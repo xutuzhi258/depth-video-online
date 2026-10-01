@@ -594,15 +594,23 @@ $('#camBtn').onclick = async () => {
 // 造成进度条无法拖动。先 seek 到极大值再回到 0，可让浏览器补全时长。
 function fixDuration(v){
   if(!v) return;
-  const patch = () => {
-    if(v.duration === Infinity || isNaN(v.duration)) v.currentTime = 1e101;
+  const seekProbe = () => { try{ v.currentTime = 1e101; }catch(e){} };
+  const confirm = () => {
+    if(isFinite(v.duration) && v.duration > 0){ v.currentTime = 0; return true; }
+    return false;
   };
-  // 元数据可能已就绪（第二段 blob 解码更快），此时 loadedmetadata 不会再触发
-  if(v.readyState >= 1) patch();
-  else v.addEventListener('loadedmetadata', patch, { once:true });
-  v.addEventListener('durationchange', () => {
-    if(isFinite(v.duration) && v.duration > 0) v.currentTime = 0;
-  });
+  // MediaRecorder 的 WebM 不写 duration（Infinity），进度条无法拖动。
+  // 通用修复：seek 到极大值迫使浏览器读取簇头补全时长，再回到 0。
+  // 多 blob 并发创建时事件触发不可靠，故用主动轮询 + 重试。
+  let tries = 0;
+  const step = () => {
+    if(confirm() || ++tries > 15) return;
+    if(v.readyState >= 1) seekProbe();
+    setTimeout(step, 200);
+  };
+  if(v.readyState >= 1) step();
+  else v.addEventListener('loadedmetadata', step, { once:true });
+  v.addEventListener('durationchange', confirm);
 }
 $('#go').onclick = async () => {
   if(!ready || mode !== 'file' || !src) return;
@@ -634,8 +642,21 @@ $('#go').onclick = async () => {
     $('#progTxt').textContent = `录制 ${label}（${i+1}/${list.length}）`;
     active = new Set([id]);
     document.querySelectorAll('.mode').forEach(x => x.classList.toggle('sel', x.dataset.id === id));
-    video.pause(); video.currentTime = 0;
-    await new Promise(r => setTimeout(r, 260));
+
+    // 关键：上一轮播放结束后 ended 仍为 true，必须等 seek 真正完成、ended 复位后再录制，
+    // 否则第二段会在毫秒级被判 ended 秒停，录到接近空的片段。
+    video.pause();
+    await new Promise(res => {
+      let done = false;
+      const finish = () => { if(done) return; done = true; res(); };
+      const onSeeked = () => { video.removeEventListener('seeked', onSeeked);
+        if(!video.ended && video.currentTime < 0.1) finish(); };
+      video.addEventListener('seeked', onSeeked);
+      try{ video.currentTime = 0; }catch(e){}
+      // 已在 0 且未 ended 时 seeked 可能不再触发，兜底延时
+      setTimeout(() => { video.removeEventListener('seeked', onSeeked); finish(); }, 1200);
+    });
+    await new Promise(r => setTimeout(r, 220));
 
     const rec = new MediaRecorder(stream, { mimeType:mime, videoBitsPerSecond:4_000_000 });
     const chunks = [];
@@ -644,10 +665,12 @@ $('#go').onclick = async () => {
     recMode = id; $('#rec').classList.add('on');
     rec.start(250);
     try{ await video.play(); }catch(e){ console.warn(e); }
+    const hardCap = (isFinite(video.duration) ? video.duration : 600) * 1000 + 20000;
     await new Promise(res => {
-      const chk = setInterval(() => { if(video.ended || video.paused){ clearInterval(chk); res(); } }, 200);
+      const to = setTimeout(() => { clearInterval(chk); res(); }, hardCap);
+      const chk = setInterval(() => { if(video.ended){ clearTimeout(to); clearInterval(chk); res(); } }, 200);
     });
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 250));
     rec.stop(); await stopped; recMode = null; $('#rec').classList.remove('on');
 
     const blob = new Blob(chunks, { type:'video/webm' });
