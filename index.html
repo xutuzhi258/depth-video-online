@@ -593,15 +593,16 @@ $('#camBtn').onclick = async () => {
 // MediaRecorder 生成的 WebM 没有时长元数据（duration = Infinity），
 // 造成进度条无法拖动。先 seek 到极大值再回到 0，可让浏览器补全时长。
 function fixDuration(v){
-  v.addEventListener('loadedmetadata', () => {
-    if(v.duration === Infinity || isNaN(v.duration)){
-      v.currentTime = 1e101;
-      v.addEventListener('timeupdate', function once(){
-        v.removeEventListener('timeupdate', once);
-        v.currentTime = 0;
-      });
-    }
-  }, { once:true });
+  if(!v) return;
+  const patch = () => {
+    if(v.duration === Infinity || isNaN(v.duration)) v.currentTime = 1e101;
+  };
+  // 元数据可能已就绪（第二段 blob 解码更快），此时 loadedmetadata 不会再触发
+  if(v.readyState >= 1) patch();
+  else v.addEventListener('loadedmetadata', patch, { once:true });
+  v.addEventListener('durationchange', () => {
+    if(isFinite(v.duration) && v.duration > 0) v.currentTime = 0;
+  });
 }
 $('#go').onclick = async () => {
   if(!ready || mode !== 'file' || !src) return;
